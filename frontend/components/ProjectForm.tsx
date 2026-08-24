@@ -1,6 +1,8 @@
 import { useState } from 'react'
-import supabase from '../lib/supabaseClient'
+import { auth, db, storage } from '../lib/firebaseClient'
 import { v4 as uuidv4 } from 'uuid'
+import { collection, addDoc, serverTimestamp, doc, setDoc } from 'firebase/firestore'
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage'
 
 export default function ProjectForm() {
   const [name, setName] = useState('')
@@ -13,44 +15,51 @@ export default function ProjectForm() {
     e.preventDefault()
     setLoading(true)
     try {
+      const user = auth.currentUser
+      if (!user) throw new Error('Not authenticated')
+
       const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-')
-      const { data: userData } = await supabase.auth.getUser()
-      const user = userData.user
-      const { data: project } = await supabase.from('projects').insert({ name, slug, description, readme, owner_id: user?.id }).select().single()
 
-      if (file && project) {
-        // Create version via server (ensures ownership)
-        const session = await supabase.auth.getSession()
-        const accessToken = session.data.session?.access_token
-        const vRes = await fetch('/api/projects/version', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + accessToken },
-          body: JSON.stringify({ project_id: project.id })
+      // create project doc in Firestore
+      const projectRef = await addDoc(collection(db, 'projects'), {
+        name,
+        slug,
+        description,
+        readme,
+        ownerId: user.uid,
+        created_at: serverTimestamp(),
+        visibility: 'public'
+      })
+
+      if (file) {
+        // create a version doc
+        const versionRef = await addDoc(collection(db, `projects/${projectRef.id}/versions`), {
+          created_by: user.uid,
+          notes: null,
+          created_at: serverTimestamp(),
         })
-        const vJson = await vRes.json()
-        if (!vRes.ok) throw new Error(vJson.error || 'Version creation failed')
-        const version = vJson.version
 
-        const versionId = version.id
-        const path = `${project.id}/${versionId}/${file.name}`
-        // upload to storage using anon client
-        const { error: uploadError } = await supabase.storage.from('projects').upload(path, file)
-        if (uploadError) throw uploadError
+        const path = `${projectRef.id}/${versionRef.id}/${file.name}`
+        const storageRef = ref(storage, path)
+        await uploadBytes(storageRef, file)
+        const downloadUrl = await getDownloadURL(storageRef)
 
-        // register file via server
-        const regRes = await fetch('/api/projects/register-file', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + accessToken },
-          body: JSON.stringify({ version_id: versionId, filename: file.name, storage_path: path, content_type: file.type, size: file.size })
+        // register file metadata under versions/{versionId}/files
+        const fileId = uuidv4()
+        await setDoc(doc(db, `projects/${projectRef.id}/versions/${versionRef.id}/files`, fileId), {
+          filename: file.name,
+          storage_path: path,
+          content_type: file.type,
+          size: file.size,
+          download_url: downloadUrl,
+          created_at: serverTimestamp()
         })
-        const regJson = await regRes.json()
-        if (!regRes.ok) throw new Error(regJson.error || 'File register failed')
       }
 
       alert('Project created')
     } catch (err:any) {
       console.error(err)
-      alert('Error: ' + err.message)
+      alert('Error: ' + (err.message || String(err)))
     } finally { setLoading(false) }
   }
 
