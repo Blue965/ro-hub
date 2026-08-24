@@ -1,0 +1,8 @@
+/* base styles */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body { @apply bg-roblue-50 }
+
+.prose pre { background: #0b1220; color: #e6edf3 }
