@@ -14,16 +14,37 @@ export default function ProjectForm() {
     setLoading(true)
     try {
       const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-')
-      const user = (await supabase.auth.getUser()).data.user
+      const { data: userData } = await supabase.auth.getUser()
+      const user = userData.user
       const { data: project } = await supabase.from('projects').insert({ name, slug, description, readme, owner_id: user?.id }).select().single()
 
       if (file && project) {
-        const versionRes = await supabase.from('versions').insert({ project_id: project.id, created_by: user?.id, version_tag: 'v1' }).select().single()
-        const versionId = versionRes.data?.id || versionRes.id || uuidv4()
+        // Create version via server (ensures ownership)
+        const session = await supabase.auth.getSession()
+        const accessToken = session.data.session?.access_token
+        const vRes = await fetch('/api/projects/version', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + accessToken },
+          body: JSON.stringify({ project_id: project.id })
+        })
+        const vJson = await vRes.json()
+        if (!vRes.ok) throw new Error(vJson.error || 'Version creation failed')
+        const version = vJson.version
+
+        const versionId = version.id
         const path = `${project.id}/${versionId}/${file.name}`
+        // upload to storage using anon client
         const { error: uploadError } = await supabase.storage.from('projects').upload(path, file)
         if (uploadError) throw uploadError
-        await supabase.from('files').insert({ version_id: versionId, filename: file.name, storage_path: path, content_type: file.type, size: file.size })
+
+        // register file via server
+        const regRes = await fetch('/api/projects/register-file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + accessToken },
+          body: JSON.stringify({ version_id: versionId, filename: file.name, storage_path: path, content_type: file.type, size: file.size })
+        })
+        const regJson = await regRes.json()
+        if (!regRes.ok) throw new Error(regJson.error || 'File register failed')
       }
 
       alert('Project created')
