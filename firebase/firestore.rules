@@ -1,0 +1,29 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Users: only allow a user to read/write their own document
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Projects
+    match /projects/{projectId} {
+      allow read: if resource.data.visibility == 'public' || (request.auth != null && request.auth.uid == resource.data.ownerId);
+      allow create: if request.auth != null && request.resource.data.ownerId == request.auth.uid;
+      allow update, delete: if request.auth != null && request.auth.uid == resource.data.ownerId;
+
+      // versions as subcollection
+      match /versions/{versionId} {
+        allow read: if exists(/databases/$(database)/documents/projects/$(projectId)) && (get(/databases/$(database)/documents/projects/$(projectId)).data.visibility == 'public' || (request.auth != null && request.auth.uid == get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId));
+        allow create: if request.auth != null && request.auth.uid == get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId;
+        allow update, delete: if request.auth != null && request.auth.uid == get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId;
+      }
+    }
+
+    // roblox_links
+    match /roblox_links/{linkId} {
+      allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
+      allow read, update: if request.auth != null && request.auth.uid == resource.data.userId;
+    }
+  }
+}
