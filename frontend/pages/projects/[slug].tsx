@@ -2,7 +2,9 @@ import { useRouter } from 'next/router'
 import { useEffect, useState } from 'react'
 import Header from '../../components/Header'
 import CodeViewer from '../../components/CodeViewer'
-import supabase from '../../lib/supabaseClient'
+import { db, storage } from '../../lib/firebaseClient'
+import { collection, query, where, getDocs, getDoc, doc, orderBy } from 'firebase/firestore'
+import { ref, getDownloadURL } from 'firebase/storage'
 
 export default function ProjectPage() {
   const router = useRouter()
@@ -14,29 +16,46 @@ export default function ProjectPage() {
   useEffect(() => {
     if (!slug) return
     ;(async () => {
-      const { data } = await supabase.from('projects').select('*').eq('slug', slug).single()
-      setProject(data)
-      if (data) {
-        const { data: vdata } = await supabase.from('versions').select('*, files(*)').eq('project_id', data.id).order('created_at', { ascending: false })
-        setVersions(vdata || [])
-        // load first file preview if exists
-        if (vdata && vdata.length > 0 && vdata[0].files && vdata[0].files.length > 0) {
-          const f = vdata[0].files[0]
-          const download = await fetch(`/api/files/download?path=${encodeURIComponent(f.storage_path)}`, { headers: { Authorization: 'Bearer ' + (await (await supabase.auth.getSession()).data.session?.access_token) } })
-          const j = await download.json()
-          const raw = await fetch(j.url).then(r=>r.text())
+      // find project by slug
+      const q = query(collection(db, 'projects'), where('slug', '==', String(slug)))
+      const snap = await getDocs(q)
+      if (snap.empty) return
+      const pdoc = snap.docs[0]
+      const pdata = { id: pdoc.id, ...pdoc.data() }
+      setProject(pdata)
+
+      // load versions
+      const vSnap = await getDocs(collection(db, `projects/${pdoc.id}/versions`))
+      const vdata = await Promise.all(vSnap.docs.map(async vd => {
+        const v = { id: vd.id, ...vd.data() }
+        // load files subcollection
+        const fSnap = await getDocs(collection(db, `projects/${pdoc.id}/versions/${vd.id}/files`))
+        v.files = fSnap.docs.map(fd => ({ id: fd.id, ...fd.data() }))
+        return v
+      }))
+      setVersions(vdata)
+
+      // preview first file if exists
+      if (vdata && vdata.length > 0 && vdata[0].files && vdata[0].files.length > 0) {
+        const f = vdata[0].files[0]
+        try {
+          const downloadUrl = f.download_url || (await getDownloadURL(ref(storage, f.storage_path)))
+          const raw = await fetch(downloadUrl).then(r=>r.text())
           setPreviewCode(raw)
+        } catch (err) {
+          console.warn('Preview failed', err)
         }
       }
     })()
   }, [slug])
 
   async function handleDownload(path:string) {
-    const session = await supabase.auth.getSession()
-    const accessToken = session.data.session?.access_token
-    const res = await fetch(`/api/files/download?path=${encodeURIComponent(path)}`, { headers: { Authorization: 'Bearer ' + accessToken } })
-    const j = await res.json()
-    if (j.url) window.open(j.url, '_blank')
+    try {
+      const url = await getDownloadURL(ref(storage, path))
+      window.open(url, '_blank')
+    } catch (err:any) {
+      alert('Download error: ' + (err.message || String(err)))
+    }
   }
 
   if (!project) return <div>Loading...</div>
@@ -46,7 +65,7 @@ export default function ProjectPage() {
       <Header />
       <main className="max-w-4xl mx-auto p-6">
         <h1 className="text-3xl font-bold mb-2">{project.name}</h1>
-        <p className="text-sm text-gray-600 mb-4">By {project.owner_id} • {project.license || 'No license'}</p>
+        <p className="text-sm text-gray-600 mb-4">By {project.ownerId} • {project.license || 'No license'}</p>
         <div className="prose mb-6">
           <pre className="whitespace-pre-wrap">{project.readme || project.description}</pre>
         </div>
@@ -57,7 +76,7 @@ export default function ProjectPage() {
             <div key={v.id} className="p-3 bg-roblue-50 rounded">
               <div className="flex justify-between items-center">
                 <div>
-                  <strong>{v.version_tag || 'v' + new Date(v.created_at).toISOString()}</strong>
+                  <strong>{v.version_tag || 'v' + new Date(v.created_at?.toDate ? v.created_at.toDate() : v.created_at).toISOString()}</strong>
                   <div className="text-sm text-gray-600">{v.notes}</div>
                 </div>
                 <div className="flex items-center gap-2">

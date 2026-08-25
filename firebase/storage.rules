@@ -1,0 +1,12 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Files under projects/ can be public-read or restricted depending on your choice
+    match /projects/{projectId}/{allPaths=**} {
+      // allow public read
+      allow read: if true;
+      // writes only by authenticated users (you can tighten to owner checks by mirroring Firestore data)
+      allow write: if request.auth != null;
+    }
+  }
+}
